@@ -14,37 +14,48 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 from anthropic import Anthropic
 
+
 # -----------------------------------------------------------------------
+# STEP 0: Load documents from a .txt file
 # Your documents — replace with your own content, or later load from files.
 # -----------------------------------------------------------------------
-documents = [
-    "Dunking requires explosive leg power, which is built through plyometric "
-    "exercises like box jumps, depth jumps, and squat jumps.",
-    "Georgetown University's Office of Advancement manages alumni engagement, "
-    "fundraising, and relationship-building with graduates.",
-    "The Mazda3 hatchback and CX-30 are popular choices for city driving in "
-    "Washington DC because of their compact size and manageable turning radius.",
-    "Learning Design and Technology (LDT) programs focus on how people learn "
-    "and how technology can be designed to support that learning process.",
-]
+
+print("Loading knowledge base...")
+
+# 1. Open the text file in "read" mode ("r")
+with open("camp_data.txt", "r", encoding="utf-8") as file:
+    raw_text = file.read()
+
+# 2. Split the massive block of text into a list of separate chunks
+# We split by "\n\n" (which represents a blank line between paragraphs)
+documents = [chunk.strip() for chunk in raw_text.split("\n\n") if chunk.strip()]
+
+print(f"Successfully loaded {len(documents)} chunks of information.")
 
 # -----------------------------------------------------------------------
-# Set up embedding model + vector database ONCE at startup (not per request —
-# this is what makes each chat message fast).
+# Lazy initialization: these don't load until the first request, avoiding
+# memory spikes during Render's build phase (free tier = 512MB limit).
 # -----------------------------------------------------------------------
-print("Loading embedding model...")
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embedder = None
+collection = None
+anthropic_client = None
 
-print("Building vector database...")
-chroma_client = chromadb.Client()
-collection = chroma_client.create_collection(name="my_docs")
-collection.add(
-    documents=documents,
-    embeddings=embedder.encode(documents).tolist(),
-    ids=[f"doc_{i}" for i in range(len(documents))],
-)
 
-anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+def init():
+    global embedder, collection, anthropic_client
+    if embedder is not None:
+        return  # already initialized
+    print("Loading embedding model...")
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    print("Building vector database...")
+    chroma_client = chromadb.Client()
+    collection = chroma_client.create_collection(name="my_docs")
+    collection.add(
+        documents=documents,
+        embeddings=embedder.encode(documents).tolist(),
+        ids=[f"doc_{i}" for i in range(len(documents))],
+    )
+    anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def retrieve(question, n_results=2):
@@ -75,6 +86,12 @@ def generate_answer(question, context_chunks):
 # The web API itself
 # -----------------------------------------------------------------------
 app = FastAPI()
+
+
+# Initialize models on server startup (after build, when running)
+@app.on_event("startup")
+def startup():
+    init()
 
 # CORS: only allow requests from YOUR website. Replace the placeholder
 # below with your actual site's domain before deploying for real.
