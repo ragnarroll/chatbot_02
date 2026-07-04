@@ -13,7 +13,7 @@ Run this with:  python3 rag_chatbot.py
 
 import os
 import chromadb
-import voyagai
+import voyageai
 from anthropic import Anthropic
 
 # -----------------------------------------------------------------------
