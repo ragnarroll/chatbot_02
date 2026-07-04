@@ -7,11 +7,11 @@ into a terminal.
 """
 
 import os
+import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
 from anthropic import Anthropic
 
 # -----------------------------------------------------------------------
@@ -31,10 +31,10 @@ def load_documents(filepath="documents.txt", chunk_size=500):
     if not os.path.exists(filepath):
         print(f"Warning: {filepath} not found. Using placeholder documents.")
         return [
-            "The Bethesda summer tennis camp offers structured, high-energy sessions focusing on tennis, fitness, and friendships. The camp is open to children and teens ages 6 to 18 of all skill levels, from beginners to advanced, with groups organized by ability.",    
-            "The summer tennis camp runs Monday through Friday. Half-day sessions operate from 9 AM to 12 PM and cost $330 per week. Full-day sessions operate from 9 AM to 3 PM and cost $550 per week.",
-            "For the first part of the summer, specifically the weeks of June 8th through June 18th, the tennis camp is located at Meadowbrook Park Tennis Courts, 6321 Meadowbrook Lane, Chevy Chase, MD 20815.",
-            "For the remainder of the summer, from June 22nd through August 14th, the tennis camp is located at Westland Middle School Tennis Courts, 5511 Massachusetts Ave, Bethesda, MD 20816.",
+            "Dunking requires explosive leg power, which is built through plyometric exercises.",
+            "Georgetown University's Office of Advancement manages alumni engagement.",
+            "The Mazda3 hatchback is popular for city driving in Washington DC.",
+            "Learning Design and Technology focuses on how people learn.",
         ]
     
     with open(filepath, "r", encoding="utf-8") as f:
@@ -78,20 +78,41 @@ def load_documents(filepath="documents.txt", chunk_size=500):
 documents = load_documents()
 
 # -----------------------------------------------------------------------
-# Lazy initialization: these don't load until the first request, avoiding
-# memory spikes during Render's build phase (free tier = 512MB limit).
+# Hugging Face Inference API for embeddings (no local model download)
 # -----------------------------------------------------------------------
-embedder = None
+HF_API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
+
+def embed_text(text):
+    """
+    Call Hugging Face Inference API to get embeddings.
+    No local model needed — all computation happens on HF's servers.
+    """
+    if not HF_TOKEN:
+        raise ValueError("HF_TOKEN environment variable not set")
+    
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    response = requests.post(HF_API_URL, headers=headers, json={"inputs": text})
+    
+    if response.status_code != 200:
+        raise Exception(f"HF API error: {response.text}")
+    
+    return response.json()
+
+
+# -----------------------------------------------------------------------
+# Lazy initialization: these don't load until the first request
+# -----------------------------------------------------------------------
 pinecone_index = None
 anthropic_client = None
+init_done = False
 
 
 def init():
-    global embedder, pinecone_index, anthropic_client
-    if embedder is not None:
+    global pinecone_index, anthropic_client, init_done
+    if init_done:
         return  # already initialized
-    print("Loading embedding model...")
-    embedder = SentenceTransformer("all-MiniLM-L6-v2")
     
     print("Connecting to Pinecone...")
     pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
@@ -100,7 +121,7 @@ def init():
     print("Uploading documents to Pinecone...")
     vectors_to_upsert = []
     for i, doc in enumerate(documents):
-        embedding = embedder.encode(doc).tolist()
+        embedding = embed_text(doc)
         vectors_to_upsert.append({
             "id": f"doc_{i}",
             "values": embedding,
@@ -109,10 +130,11 @@ def init():
     pinecone_index.upsert(vectors=vectors_to_upsert)
     
     anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    init_done = True
 
 
 def retrieve(question, n_results=2):
-    question_embedding = embedder.encode(question).tolist()
+    question_embedding = embed_text(question)
     results = pinecone_index.query(
         vector=question_embedding,
         top_k=n_results,
