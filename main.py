@@ -10,60 +10,116 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import chromadb
+from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
 from anthropic import Anthropic
 
-
 # -----------------------------------------------------------------------
-# STEP 0: Load documents from a .txt file
-# Your documents — replace with your own content, or later load from files.
+# Load documents from a text file
 # -----------------------------------------------------------------------
+def load_documents(filepath="documents.txt", chunk_size=500):
+    """
+    Load documents from a text file and split into chunks.
+    
+    Args:
+        filepath: path to the .txt file (default: documents.txt in same folder)
+        chunk_size: approximate words per chunk (default: 500)
+    
+    Returns:
+        list of document chunks
+    """
+    if not os.path.exists(filepath):
+        print(f"Warning: {filepath} not found. Using placeholder documents.")
+        return [
+            "The Bethesda summer tennis camp offers structured, high-energy sessions focusing on tennis, fitness, and friendships. The camp is open to children and teens ages 6 to 18 of all skill levels, from beginners to advanced, with groups organized by ability.",    
+            "The summer tennis camp runs Monday through Friday. Half-day sessions operate from 9 AM to 12 PM and cost $330 per week. Full-day sessions operate from 9 AM to 3 PM and cost $550 per week.",
+            "For the first part of the summer, specifically the weeks of June 8th through June 18th, the tennis camp is located at Meadowbrook Park Tennis Courts, 6321 Meadowbrook Lane, Chevy Chase, MD 20815.",
+            "For the remainder of the summer, from June 22nd through August 14th, the tennis camp is located at Westland Middle School Tennis Courts, 5511 Massachusetts Ave, Bethesda, MD 20816.",
+        ]
+    
+    with open(filepath, "r", encoding="utf-8") as f:
+        text = f.read()
+    
+    # Split by double newlines (paragraphs) first, then further split if needed
+    paragraphs = text.split("\n\n")
+    documents = []
+    
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        
+        # If paragraph is too long, split by sentences
+        words = para.split()
+        if len(words) > chunk_size:
+            sentences = para.split(". ")
+            current_chunk = []
+            current_word_count = 0
+            
+            for sentence in sentences:
+                sentence_words = len(sentence.split())
+                if current_word_count + sentence_words > chunk_size and current_chunk:
+                    documents.append(". ".join(current_chunk) + ".")
+                    current_chunk = [sentence]
+                    current_word_count = sentence_words
+                else:
+                    current_chunk.append(sentence)
+                    current_word_count += sentence_words
+            
+            if current_chunk:
+                documents.append(". ".join(current_chunk) + ".")
+        else:
+            documents.append(para)
+    
+    print(f"Loaded {len(documents)} document chunks from {filepath}")
+    return documents
 
-print("Loading knowledge base...")
 
-# 1. Open the text file in "read" mode ("r")
-with open("camp_data.txt", "r", encoding="utf-8") as file:
-    raw_text = file.read()
-
-# 2. Split the massive block of text into a list of separate chunks
-# We split by "\n\n" (which represents a blank line between paragraphs)
-documents = [chunk.strip() for chunk in raw_text.split("\n\n") if chunk.strip()]
-
-print(f"Successfully loaded {len(documents)} chunks of information.")
+documents = load_documents()
 
 # -----------------------------------------------------------------------
 # Lazy initialization: these don't load until the first request, avoiding
 # memory spikes during Render's build phase (free tier = 512MB limit).
 # -----------------------------------------------------------------------
 embedder = None
-collection = None
+pinecone_index = None
 anthropic_client = None
 
 
 def init():
-    global embedder, collection, anthropic_client
+    global embedder, pinecone_index, anthropic_client
     if embedder is not None:
         return  # already initialized
     print("Loading embedding model...")
     embedder = SentenceTransformer("all-MiniLM-L6-v2")
-    print("Building vector database...")
-    chroma_client = chromadb.Client()
-    collection = chroma_client.create_collection(name="my_docs")
-    collection.add(
-        documents=documents,
-        embeddings=embedder.encode(documents).tolist(),
-        ids=[f"doc_{i}" for i in range(len(documents))],
-    )
+    
+    print("Connecting to Pinecone...")
+    pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+    pinecone_index = pc.Index(os.environ.get("PINECONE_INDEX_NAME"))
+    
+    print("Uploading documents to Pinecone...")
+    vectors_to_upsert = []
+    for i, doc in enumerate(documents):
+        embedding = embedder.encode(doc).tolist()
+        vectors_to_upsert.append({
+            "id": f"doc_{i}",
+            "values": embedding,
+            "metadata": {"text": doc}
+        })
+    pinecone_index.upsert(vectors=vectors_to_upsert)
+    
     anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def retrieve(question, n_results=2):
-    results = collection.query(
-        query_embeddings=embedder.encode([question]).tolist(),
-        n_results=n_results,
+    question_embedding = embedder.encode(question).tolist()
+    results = pinecone_index.query(
+        vector=question_embedding,
+        top_k=n_results,
+        include_metadata=True
     )
-    return results["documents"][0]
+    # Extract the actual text from metadata
+    return [match["metadata"]["text"] for match in results["matches"]]
 
 
 def generate_answer(question, context_chunks):

@@ -1,5 +1,5 @@
 fastapi
 uvicorn
 sentence-transformers
-chromadb
+pinecone-client
 anthropic
