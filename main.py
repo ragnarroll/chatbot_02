@@ -96,6 +96,18 @@ def generate_answer(question, context_chunks):
         f"Context:\n{context}\n\n"
         f"Question: {question}"
     )
+
+       # System prompt: tells Claude HOW to behave (tone, format, style)
+    system_prompt = (
+        "Tell the user that you are a helpful assistant answering questions based on provided context. "
+        "Tell the user that they can request to loop in one of our team members via email if they want to, but the response time will be slower. "
+        "Keep responses concise and clear. "
+        "Use bullet points for lists. "
+        "If information is missing, be honest about it. "
+        "Maintain a friendly but professional tone."
+        "Suggest next steps or ask clarifying questions when appropriate."
+    )
+
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=300,
