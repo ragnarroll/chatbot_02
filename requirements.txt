@@ -2,4 +2,4 @@ fastapi
 uvicorn
 pinecone
 anthropic
-requests
+voyageai

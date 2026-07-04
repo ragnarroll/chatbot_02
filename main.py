@@ -7,12 +7,12 @@ into a terminal.
 """
 
 import os
-import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pinecone import Pinecone
 from anthropic import Anthropic
+import voyageai
 
 # -----------------------------------------------------------------------
 # Load documents from a text file
@@ -78,27 +78,30 @@ def load_documents(filepath="documents.txt", chunk_size=500):
 documents = load_documents()
 
 # -----------------------------------------------------------------------
-# Hugging Face Inference API for embeddings (no local model download)
+# Voyage AI for embeddings (cheap, high quality: voyage-4-lite)
 # -----------------------------------------------------------------------
-HF_API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
-HF_TOKEN = os.environ.get("HF_TOKEN")
+voyage_client = None
+
+
+def get_voyage_client():
+    global voyage_client
+    if voyage_client is None:
+        voyage_client = voyageai.Client(api_key=os.environ.get("VOYAGE_API_KEY"))
+    return voyage_client
 
 
 def embed_text(text):
     """
-    Call Hugging Face Inference API to get embeddings.
-    No local model needed — all computation happens on HF's servers.
+    Call Voyage AI's embedding API to get embeddings.
+    Returns 1024-dimensional vectors (voyage-4-lite model).
+    Cheaper and faster than OpenAI, excellent quality.
     """
-    if not HF_TOKEN:
-        raise ValueError("HF_TOKEN environment variable not set")
-    
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    response = requests.post(HF_API_URL, headers=headers, json={"inputs": text})
-    
-    if response.status_code != 200:
-        raise Exception(f"HF API error: {response.text}")
-    
-    return response.json()
+    client = get_voyage_client()
+    result = client.embed(
+        [text],
+        model="voyage-4-lite"
+    )
+    return result.embeddings[0]
 
 
 # -----------------------------------------------------------------------
@@ -191,7 +194,7 @@ app = FastAPI()
 @app.on_event("startup")
 def startup():
     # Check that required env vars exist (fail fast if missing)
-    required = ["PINECONE_API_KEY", "PINECONE_INDEX_NAME", "ANTHROPIC_API_KEY", "HF_TOKEN"]
+    required = ["PINECONE_API_KEY", "PINECONE_INDEX_NAME", "ANTHROPIC_API_KEY", "VOYAGE_API_KEY"]
     missing = [v for v in required if not os.environ.get(v)]
     if missing:
         raise ValueError(f"Missing environment variables: {', '.join(missing)}")
