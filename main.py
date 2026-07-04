@@ -102,38 +102,59 @@ def embed_text(text):
 
 
 # -----------------------------------------------------------------------
-# Lazy initialization: these don't load until the first request
+# Lazy initialization: connections happen on first chat request
 # -----------------------------------------------------------------------
 pinecone_index = None
 anthropic_client = None
-init_done = False
+docs_uploaded = False
 
 
 def init():
-    global pinecone_index, anthropic_client, init_done
-    if init_done:
+    """Initialize Pinecone and Anthropic connections (safe to do on first request)."""
+    global pinecone_index, anthropic_client
+    
+    if pinecone_index is not None:
         return  # already initialized
     
     print("Connecting to Pinecone...")
     pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
     pinecone_index = pc.Index(os.environ.get("PINECONE_INDEX_NAME"))
     
+    print("Connecting to Anthropic...")
+    anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def upload_documents_to_pinecone():
+    """Upload documents to Pinecone on first chat request (when server is running)."""
+    global docs_uploaded
+    
+    if docs_uploaded:
+        return  # already done
+    
+    init()  # ensure Pinecone is connected
+    
     print("Uploading documents to Pinecone...")
     vectors_to_upsert = []
     for i, doc in enumerate(documents):
-        embedding = embed_text(doc)
-        vectors_to_upsert.append({
-            "id": f"doc_{i}",
-            "values": embedding,
-            "metadata": {"text": doc}
-        })
-    pinecone_index.upsert(vectors=vectors_to_upsert)
+        try:
+            embedding = embed_text(doc)
+            vectors_to_upsert.append({
+                "id": f"doc_{i}",
+                "values": embedding,
+                "metadata": {"text": doc}
+            })
+        except Exception as e:
+            print(f"Warning: failed to embed doc {i}: {e}")
     
-    anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-    init_done = True
+    if vectors_to_upsert:
+        pinecone_index.upsert(vectors=vectors_to_upsert)
+        print(f"Uploaded {len(vectors_to_upsert)} document chunks to Pinecone")
+    
+    docs_uploaded = True
 
 
 def retrieve(question, n_results=2):
+    init()  # ensure Pinecone is connected
     question_embedding = embed_text(question)
     results = pinecone_index.query(
         vector=question_embedding,
@@ -166,10 +187,15 @@ def generate_answer(question, context_chunks):
 app = FastAPI()
 
 
-# Initialize models on server startup (after build, when running)
+# Startup hook — just validate environment, don't call APIs yet
 @app.on_event("startup")
 def startup():
-    init()
+    # Check that required env vars exist (fail fast if missing)
+    required = ["PINECONE_API_KEY", "PINECONE_INDEX_NAME", "ANTHROPIC_API_KEY", "HF_TOKEN"]
+    missing = [v for v in required if not os.environ.get(v)]
+    if missing:
+        raise ValueError(f"Missing environment variables: {', '.join(missing)}")
+    print(f"✓ All environment variables set")
 
 # CORS: only allow requests from YOUR website. Replace the placeholder
 # below with your actual site's domain before deploying for real.
@@ -192,6 +218,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 def chat(req: ChatRequest):
+    upload_documents_to_pinecone()  # upload on first request (safe when server is running)
     chunks = retrieve(req.question)
     answer = generate_answer(req.question, chunks)
     return {"answer": answer}
