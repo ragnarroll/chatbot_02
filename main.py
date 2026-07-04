@@ -92,6 +92,7 @@ def generate_answer(question, context_chunks):
     context = "\n\n".join(context_chunks)
     prompt = (
         f"Use the following context to answer the question. "
+        f"Suggest next steps or ask clarifying questions when appropriate."
         f"If the context doesn't contain the answer, say so.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {question}"
@@ -105,7 +106,7 @@ def generate_answer(question, context_chunks):
         "Use bullet points for lists. "
         "If information is missing, be honest about it. "
         "Maintain a friendly but professional tone."
-        "Suggest next steps or ask clarifying questions when appropriate."
+        
     )
 
     response = client.messages.create(
