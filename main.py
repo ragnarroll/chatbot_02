@@ -1,171 +1,91 @@
 """
-main.py — your RAG chatbot, exposed as a web API.
+rag_chatbot.py
+A minimal, from-scratch RAG (Retrieval-Augmented Generation) chatbot.
 
-Same 4 steps as rag_chatbot.py (embed / store / retrieve / generate),
-just wrapped so a website can call it over HTTP instead of you typing
-into a terminal.
+The 4 steps, matching what we walked through by hand:
+  1. EMBED    - turn text into vectors using a real neural embedding model
+  2. STORE    - save those vectors in a vector database (Chroma)
+  3. RETRIEVE - find the closest-matching chunks to a user's question
+  4. GENERATE - hand those chunks + the question to an LLM to write the answer
+
+Run this with:  python3 rag_chatbot.py
 """
 
 import os
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from pinecone import Pinecone
+import chromadb
+import voyagai
 from anthropic import Anthropic
-import voyageai
 
 # -----------------------------------------------------------------------
-# Load documents from a text file
+# STEP 0: Load documents from a .txt file
+# load them from .txt files (see load_documents_from_folder() below).
 # -----------------------------------------------------------------------
-def load_documents(filepath="documents.txt", chunk_size=500):
-    """
-    Load documents from a text file and split into chunks.
-    
-    Args:
-        filepath: path to the .txt file (default: documents.txt in same folder)
-        chunk_size: approximate words per chunk (default: 500)
-    
-    Returns:
-        list of document chunks
-    """
-    if not os.path.exists(filepath):
-        print(f"Warning: {filepath} not found. Using placeholder documents.")
-        return [
-            "Dunking requires explosive leg power, which is built through plyometric exercises.",
-            "Georgetown University's Office of Advancement manages alumni engagement.",
-            "The Mazda3 hatchback is popular for city driving in Washington DC.",
-            "Learning Design and Technology focuses on how people learn.",
-        ]
-    
-    with open(filepath, "r", encoding="utf-8") as f:
-        text = f.read()
-    
-    # Split by double newlines (paragraphs) first, then further split if needed
-    paragraphs = text.split("\n\n")
-    documents = []
-    
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
-            continue
-        
-        # If paragraph is too long, split by sentences
-        words = para.split()
-        if len(words) > chunk_size:
-            sentences = para.split(". ")
-            current_chunk = []
-            current_word_count = 0
-            
-            for sentence in sentences:
-                sentence_words = len(sentence.split())
-                if current_word_count + sentence_words > chunk_size and current_chunk:
-                    documents.append(". ".join(current_chunk) + ".")
-                    current_chunk = [sentence]
-                    current_word_count = sentence_words
-                else:
-                    current_chunk.append(sentence)
-                    current_word_count += sentence_words
-            
-            if current_chunk:
-                documents.append(". ".join(current_chunk) + ".")
-        else:
-            documents.append(para)
-    
-    print(f"Loaded {len(documents)} document chunks from {filepath}")
-    return documents
+print("Loading knowledge base...")
 
+# 1. Open the text file in "read" mode ("r")
+with open("documents.txt", "r", encoding="utf-8") as file:
+    raw_text = file.read()
 
-documents = load_documents()
+# 2. Split the massive block of text into a list of separate chunks
+# We split by "\n\n" (which represents a blank line between paragraphs)
+documents = [chunk.strip() for chunk in raw_text.split("\n\n") if chunk.strip()]
+
+print(f"Successfully loaded {len(documents)} chunks of information.")
 
 # -----------------------------------------------------------------------
-# Voyage AI for embeddings (cheap, high quality: voyage-4-lite)
+# STEP 1: EMBEDDING
+
+# Voyage AI uses a neural network to turn text into vectors that capture
+# MEANING. The voyage-4-lite model returns 1024-dimensional vectors.
+# Requires VOYAGE_API_KEY environment variable.
 # -----------------------------------------------------------------------
-voyage_client = None
-
-
-def get_voyage_client():
-    global voyage_client
-    if voyage_client is None:
-        voyage_client = voyageai.Client(api_key=os.environ.get("VOYAGE_API_KEY"))
-    return voyage_client
-
-
-def embed_text(text):
-    """
-    Call Voyage AI's embedding API to get embeddings.
-    Returns 1024-dimensional vectors (voyage-4-lite model).
-    Cheaper and faster than OpenAI, excellent quality.
-    """
-    client = get_voyage_client()
-    result = client.embed(
-        [text],
+print("Initializing Voyage AI client (voyage-4-lite)...")
+voyage_client = voyageai.Client(api_key=os.environ.get("VOYAGE_API_KEY"))
+ 
+ 
+def embed(texts):
+    """Turn a list of strings into a list of 1024-dimensional vectors."""
+    result = voyage_client.embed(
+        texts,
         model="voyage-4-lite"
     )
-    return result.embeddings[0]
+    return [emb for emb in result.embeddings]
+
+# -----------------------------------------------------------------------
+# STEP 2: STORAGE
+# Chroma is a lightweight vector database. We create a "collection"
+# (like a table) and add our documents + their vectors to it.
+# -----------------------------------------------------------------------
+print("Setting up vector database...")
+chroma_client = chromadb.Client()  # in-memory; use PersistentClient() to save to disk
+collection = chroma_client.create_collection(name="my_docs")
+
+collection.add(
+    documents=documents,
+    embeddings=embed(documents),
+    ids=[f"doc_{i}" for i in range(len(documents))],
+)
 
 
 # -----------------------------------------------------------------------
-# Lazy initialization: connections happen on first chat request
+# STEP 3: RETRIEVAL
+# Embed the user's question the SAME way, then ask Chroma for the
+# n closest document vectors (by distance, same idea as our by-hand demo).
 # -----------------------------------------------------------------------
-pinecone_index = None
-anthropic_client = None
-docs_uploaded = False
-
-
-def init():
-    """Initialize Pinecone and Anthropic connections (safe to do on first request)."""
-    global pinecone_index, anthropic_client
-    
-    if pinecone_index is not None:
-        return  # already initialized
-    
-    print("Connecting to Pinecone...")
-    pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-    pinecone_index = pc.Index(os.environ.get("PINECONE_INDEX_NAME"))
-    
-    print("Connecting to Anthropic...")
-    anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
-
-def upload_documents_to_pinecone():
-    """Upload documents to Pinecone on first chat request (when server is running)."""
-    global docs_uploaded
-    
-    if docs_uploaded:
-        return  # already done
-    
-    init()  # ensure Pinecone is connected
-    
-    print("Uploading documents to Pinecone...")
-    vectors_to_upsert = []
-    for i, doc in enumerate(documents):
-        try:
-            embedding = embed_text(doc)
-            vectors_to_upsert.append({
-                "id": f"doc_{i}",
-                "values": embedding,
-                "metadata": {"text": doc}
-            })
-        except Exception as e:
-            print(f"Warning: failed to embed doc {i}: {e}")
-    
-    if vectors_to_upsert:
-        pinecone_index.upsert(vectors=vectors_to_upsert)
-        print(f"Uploaded {len(vectors_to_upsert)} document chunks to Pinecone")
-    
-    docs_uploaded = True
-
-
 def retrieve(question, n_results=2):
-    init()  # ensure Pinecone is connected
-    question_embedding = embed_text(question)
-    results = pinecone_index.query(
-        vector=question_embedding,
-        top_k=n_results,
-        include_metadata=True
+    results = collection.query(
+        query_embeddings=embed([question]),
+        n_results=n_results,
     )
-    # Extract the actual text from metadata
-    return [match["metadata"]["text"] for match in results["matches"]]
+    return results["documents"][0]  # list of the closest matching chunks
+
+
+# -----------------------------------------------------------------------
+# STEP 4: GENERATION
+# Hand the retrieved chunks + the original question to an LLM, with
+# instructions to answer USING that context. This requires an API key.
+# -----------------------------------------------------------------------
+client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def generate_answer(question, context_chunks):
@@ -176,7 +96,7 @@ def generate_answer(question, context_chunks):
         f"Context:\n{context}\n\n"
         f"Question: {question}"
     )
-    response = anthropic_client.messages.create(
+    response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}],
@@ -185,48 +105,23 @@ def generate_answer(question, context_chunks):
 
 
 # -----------------------------------------------------------------------
-# The web API itself
+# Put it all together
 # -----------------------------------------------------------------------
-app = FastAPI()
+def chat(question):
+    chunks = retrieve(question)
+    print("\n--- Retrieved context ---")
+    for c in chunks:
+        print(f"  - {c}")
+    answer = generate_answer(question, chunks)
+    print("\n--- Answer ---")
+    print(answer)
+    return answer
 
 
-# Startup hook — just validate environment, don't call APIs yet
-@app.on_event("startup")
-def startup():
-    # Check that required env vars exist (fail fast if missing)
-    required = ["PINECONE_API_KEY", "PINECONE_INDEX_NAME", "ANTHROPIC_API_KEY", "VOYAGE_API_KEY"]
-    missing = [v for v in required if not os.environ.get(v)]
-    if missing:
-        raise ValueError(f"Missing environment variables: {', '.join(missing)}")
-    print(f"✓ All environment variables set")
-
-# CORS: only allow requests from YOUR website. Replace the placeholder
-# below with your actual site's domain before deploying for real.
-ALLOWED_ORIGINS = [
-    "https://your-website.com",       # <-- CHANGE THIS
-    "http://localhost:3000",          # handy for local testing
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["POST"],
-    allow_headers=["*"],
-)
-
-
-class ChatRequest(BaseModel):
-    question: str
-
-
-@app.post("/chat")
-def chat(req: ChatRequest):
-    upload_documents_to_pinecone()  # upload on first request (safe when server is running)
-    chunks = retrieve(req.question)
-    answer = generate_answer(req.question, chunks)
-    return {"answer": answer}
-
-
-@app.get("/")
-def health_check():
-    return {"status": "ok"}
+if __name__ == "__main__":
+    print("\nRAG chatbot ready. Type a question (or 'quit' to exit).\n")
+    while True:
+        q = input("You: ")
+        if q.strip().lower() in ("quit", "exit"):
+            break
+        chat(q)
