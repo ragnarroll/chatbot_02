@@ -42,15 +42,10 @@ documents = load_documents()
 
 app = FastAPI()
 
-# Add CORS middleware
-ALLOWED_ORIGINS = [
-    "https://www.starrmarktennis.com",
-    "http://localhost:3000",
-]
-
+# Add CORS middleware — allow all origins (Claude artifacts, any website, etc.)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],  # Allow requests from anywhere
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
