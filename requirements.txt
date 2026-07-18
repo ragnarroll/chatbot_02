@@ -1,5 +1,3 @@
-fastapi
-uvicorn
-pinecone
-anthropic
 voyageai
+chromadb
+anthropic

@@ -3,12 +3,9 @@ main.py — RAG chatbot as a web API for Starr Mark Tennis
 """
 
 import os
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from pinecone import Pinecone
-from anthropic import Anthropic
+import chromadb
 import voyageai
+from anthropic import Anthropic
 
 # ============================================================================
 # LOAD DOCUMENTS AT STARTUP (only read the file, don't call APIs yet)
@@ -144,6 +141,7 @@ def generate_answer(question, context_chunks):
     context = "\n\n".join(context_chunks)
     prompt = (
         f"Use the following context to answer the question. "
+        f"Suggest next steps or ask clarifying questions when appropriate."
         f"If the context doesn't contain the answer, say so.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {question}"
