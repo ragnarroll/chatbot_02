@@ -1,3 +1,5 @@
-voyageai
-chromadb
+fastapi
+uvicorn
+pinecone-client
 anthropic
+voyageai
