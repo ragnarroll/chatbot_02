@@ -139,7 +139,8 @@ def generate_answer(question, context_chunks):
     context = "\n\n".join(context_chunks)
     prompt = (
         f"Use the following context to answer the question. "
-        f"If the context doesn't contain the answer, say so.\n\n"
+        f"If the context doesn't contain the answer, say so."
+        f"Do not use emojis. Produce only plain text.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {question}"
     )
