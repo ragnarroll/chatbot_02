@@ -126,7 +126,7 @@ def retrieve(question, n_results=2):
     question_embedding = embed_text(question)
     results = pinecone_index.query(
         vector=question_embedding,
-        top_k=n_results,
+        top_k=max(n_results, 4),
         include_metadata=True
     )
     return [match["metadata"]["text"] for match in results["matches"]]
